@@ -11,6 +11,7 @@ pub fn to_u32(v: usize) -> u32 {
 
 use super::{execute, BranchOffset, CursorID, FuncCtx, InsnFunction, PageIdx};
 use crate::function::AccumulatorFunc;
+use crate::namespace::{NamespaceId, NamespaceRef};
 use crate::{
     schema::{BTreeTable, CheckConstraint, Column, ForeignKey, Index},
     storage::{pager::CreateBTreeFlags, wal::CheckpointMode},
@@ -301,6 +302,7 @@ impl From<BitSet> for NullMatchingMask {
 #[derive(Debug, Clone)]
 pub struct AddColumnData {
     pub db: usize,
+    pub namespace: NamespaceId,
     pub table: String,
     pub column: Column,
     pub check_constraints: Vec<CheckConstraint>,
@@ -311,11 +313,12 @@ pub struct AddColumnData {
 #[derive(Debug, Clone)]
 pub struct AlterColumnData {
     pub db: usize,
+    pub namespace: NamespaceId,
     pub table: String,
     pub column_index: usize,
     pub definition: turso_parser::ast::ColumnDefinition,
     pub rename: bool,
-    pub rewritten_triggers: Vec<(usize, String, String)>,
+    pub rewritten_triggers: Vec<(NamespaceRef, String, String)>,
 }
 
 /// Data for IntegrityCk instruction (boxed to keep Insn small).
@@ -332,6 +335,7 @@ pub struct IntegrityCkData {
 #[derive(Debug, Clone)]
 pub struct AddSequenceData {
     pub db: usize,
+    pub namespace: NamespaceId,
     pub name: String,
     pub start: i64,
     pub increment: i64,
@@ -1742,6 +1746,8 @@ pub enum Insn {
     DropTable {
         ///  The database within which this b-tree needs to be dropped (P1).
         db: usize,
+        /// The namespace of the table being dropped.
+        namespace: NamespaceId,
         ///  unused register p2
         _p2: usize,
         ///  unused register p3
@@ -1752,12 +1758,16 @@ pub enum Insn {
     DropView {
         /// The database within which this view needs to be dropped
         db: usize,
+        /// The namespace of the view being dropped.
+        namespace: NamespaceId,
         /// The name of the view being dropped
         view_name: String,
     },
     DropIndex {
         ///  The database within which this index needs to be dropped (P1).
         db: usize,
+        /// The namespace of the index being dropped.
+        namespace: NamespaceId,
         //  The name of the index being dropped
         index: Arc<Index>,
     },
@@ -1765,6 +1775,8 @@ pub enum Insn {
     DropTrigger {
         /// The database within which this trigger needs to be dropped (P1).
         db: usize,
+        /// The namespace of the trigger being dropped.
+        namespace: NamespaceId,
         /// The name of the trigger being dropped
         trigger_name: String,
     },
@@ -1784,8 +1796,18 @@ pub enum Insn {
     DropSequence {
         /// The database within which this sequence needs to be dropped
         db: usize,
+        /// The namespace of the sequence being dropped.
+        namespace: NamespaceId,
         /// The name of the sequence being dropped
         seq_name: String,
+    },
+    /// Forget a stored namespace in the in-memory schema, after DROP SCHEMA
+    /// deleted its row.
+    DropNamespace {
+        /// The database the namespace is stored in
+        db: usize,
+        /// The namespace being dropped
+        namespace: NamespaceId,
     },
     /// Begin the autonomous inner transaction that wraps a sequence
     /// read-modify-write. The translator emits this immediately before
@@ -1851,6 +1873,7 @@ pub enum Insn {
     /// `LimboError::SequenceExhausted` on overflow when `cycle` is false.
     SequenceComputeNext {
         db: usize,
+        namespace: NamespaceId,
         seq_name: String,
         in_value_reg: usize,
         in_is_called_reg: usize,
@@ -1862,6 +1885,7 @@ pub enum Insn {
     /// register operation.
     SetSequenceCurrval {
         db: usize,
+        namespace: NamespaceId,
         seq_name: String,
         value_reg: usize,
     },
@@ -1869,6 +1893,7 @@ pub enum Insn {
     /// successful sequence RMW commit.
     SequenceTrackAllocation {
         db: usize,
+        namespace: NamespaceId,
         seq_name: String,
         value_reg: usize,
     },
@@ -1881,6 +1906,7 @@ pub enum Insn {
     /// closes.
     SequenceRegisterAllocation {
         db: usize,
+        namespace: NamespaceId,
         seq_name: String,
         value_reg: usize,
         /// Register holding the encoded saved outer mv_tx (the blob written
@@ -2113,11 +2139,13 @@ pub enum Insn {
     },
     RenameTable {
         db: usize,
+        namespace: NamespaceId,
         from: String,
         to: String,
     },
     DropColumn {
         db: usize,
+        namespace: NamespaceId,
         table: String,
         column_index: usize,
     },
@@ -2537,6 +2565,7 @@ impl InsnVariants {
             InsnVariants::DropType => execute::op_drop_type,
             InsnVariants::AddSequence => execute::op_add_sequence,
             InsnVariants::DropSequence => execute::op_drop_sequence,
+            InsnVariants::DropNamespace => execute::op_drop_namespace,
             InsnVariants::SequenceComputeNext => execute::op_sequence_compute_next,
             InsnVariants::SetSequenceCurrval => execute::op_set_sequence_currval,
             InsnVariants::SequenceTrackAllocation => execute::op_sequence_track_allocation,
@@ -2658,6 +2687,7 @@ impl Insn {
             | Self::DropType { .. }
             | Self::AddSequence { .. }
             | Self::DropSequence { .. }
+            | Self::DropNamespace { .. }
             | Self::SequenceComputeNext { .. }
             | Self::SetSequenceCurrval { .. }
             | Self::SequenceTrackAllocation { .. }

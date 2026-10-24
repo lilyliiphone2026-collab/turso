@@ -1,3 +1,4 @@
+use crate::namespace::NamespaceRef;
 use crate::sync::Arc;
 use crate::{turso_assert, turso_assert_greater_than_or_equal};
 
@@ -1246,7 +1247,7 @@ fn plan_cte(
                 has_alias: referenced_cte_table.has_alias,
                 internal_id: referenced_cte_table.internal_id,
                 table: referenced_cte_table.table.clone(),
-                database_id: referenced_cte_table.database_id,
+                namespace: referenced_cte_table.namespace,
                 join_info: None,
                 col_used_mask: ColumnUsedMask::default(),
                 cte_select: None,
@@ -1450,7 +1451,7 @@ fn prepare_recursive_cte_plan(
         has_alias: false,
         internal_id: input_table.internal_id,
         table: input_table.table,
-        database_id: input_table.database_id,
+        namespace: input_table.namespace,
         join_info: None,
         col_used_mask: ColumnUsedMask::default(),
         cte_select: None,
@@ -1647,7 +1648,7 @@ fn parse_from_clause_table(
                     identifier: cte_definition.name.clone(),
                     has_alias: false,
                     internal_id: cte_table.internal_id,
-                    database_id: cte_table.database_id,
+                    namespace: cte_table.namespace,
                     table: cte_table.table,
                     join_info: None,
                     col_used_mask: ColumnUsedMask::default(),
@@ -1831,7 +1832,7 @@ fn keep_parenthesized_join_columns(table: &mut JoinedTable) -> Result<()> {
         };
 
         let database_id = matches!(source_table.table, Table::BTree(_) | Table::Virtual(_))
-            .then_some(source_table.database_id);
+            .then_some(source_table.namespace.database_id);
         let source_join_columns = source_table.table.parenthesized_join_columns();
         for (column_index, column) in source_table.columns().iter().enumerate() {
             let Some(column_name) = column.name.as_deref() else {
@@ -2128,7 +2129,7 @@ fn parse_table(
                     col_used_mask: ColumnUsedMask::default(),
                     column_use_counts: Vec::new(),
                     expression_index_usages: Vec::new(),
-                    database_id: crate::MAIN_DB_ID,
+                    namespace: NamespaceRef::root_of(crate::MAIN_DB_ID),
                     indexed: None,
                     plan_estimate: None,
                 });
@@ -2171,7 +2172,7 @@ fn parse_table(
             col_used_mask: ColumnUsedMask::default(),
             column_use_counts: Vec::new(),
             expression_index_usages: Vec::new(),
-            database_id,
+            namespace,
             indexed,
             plan_estimate: None,
         });
@@ -2283,7 +2284,7 @@ fn parse_table(
             col_used_mask: ColumnUsedMask::default(),
             column_use_counts: Vec::new(),
             expression_index_usages: Vec::new(),
-            database_id,
+            namespace,
             indexed: None,
             plan_estimate: None,
         });
@@ -2310,7 +2311,7 @@ fn parse_table(
                     col_used_mask: ColumnUsedMask::default(),
                     column_use_counts: Vec::new(),
                     expression_index_usages: Vec::new(),
-                    database_id,
+                    namespace,
                     indexed: None,
                     plan_estimate: None,
                 });
@@ -2529,7 +2530,7 @@ fn add_ctes_read_by_subqueries_as_outer_refs(
             identifier: cte_definition.name.clone(),
             has_alias: false,
             internal_id: joined_table.internal_id,
-            database_id: joined_table.database_id,
+            namespace: joined_table.namespace,
             table: joined_table.table,
             join_info: None,
             col_used_mask: ColumnUsedMask::default(),

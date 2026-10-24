@@ -122,12 +122,13 @@ pub fn translate(
     } else {
         connection.search_path()
     };
+    let namespaces = connection.namespaces_in(schema);
     let mut resolver = Resolver::new(
         schema,
         connection.database_schemas(),
         &connection.temp.database,
         connection.attached_databases(),
-        connection.namespaces(),
+        &namespaces,
         syms,
         connection.experimental_custom_types_enabled(),
         connection.get_dqs_dml().into(),
@@ -203,6 +204,8 @@ pub fn translate_inner(
             | ast::Stmt::Insert { .. }
             | ast::Stmt::CreateSequence { .. }
             | ast::Stmt::DropSequence { .. }
+            | ast::Stmt::CreateSchema { .. }
+            | ast::Stmt::DropSchema { .. }
     );
     let is_vacuum = matches!(stmt, ast::Stmt::Vacuum { .. });
 
@@ -284,32 +287,19 @@ pub fn translate_inner(
             for_each_row,
             when_clause,
             commands,
-        } => {
-            // Reconstruct SQL for storage
-            let sql = trigger::create_trigger_to_sql(
-                temporary,
-                if_not_exists,
-                &trigger_name,
-                time,
-                &event,
-                &tbl_name,
-                for_each_row,
-                when_clause.as_deref(),
-                &commands,
-            );
-            trigger::translate_create_trigger(
-                trigger_name,
-                resolver,
-                temporary,
-                if_not_exists,
-                time,
-                tbl_name,
-                program,
-                sql,
-                &commands,
-                when_clause.as_deref(),
-            )?
-        }
+        } => trigger::translate_create_trigger(
+            trigger_name,
+            resolver,
+            temporary,
+            if_not_exists,
+            time,
+            &event,
+            tbl_name,
+            for_each_row,
+            program,
+            &commands,
+            when_clause.as_deref(),
+        )?,
         ast::Stmt::CreateView {
             view_name,
             select,
@@ -519,6 +509,12 @@ pub fn translate_inner(
         } => {
             sequence::translate_drop_sequence(&seq_name, if_exists, resolver, program)?;
         }
+        ast::Stmt::CreateSchema { name } => {
+            schema::translate_create_schema(&name, resolver, program)?;
+        }
+        ast::Stmt::DropSchema { name } => {
+            schema::translate_drop_schema(&name, resolver, program)?;
+        }
     };
 
     if is_write {
@@ -587,6 +583,8 @@ fn stmt_kind(stmt: &ast::Stmt) -> &'static str {
         ast::Stmt::Optimize { .. } => "optimize",
         ast::Stmt::CreateSequence { .. } => "create_sequence",
         ast::Stmt::DropSequence { .. } => "drop_sequence",
+        ast::Stmt::CreateSchema { .. } => "create_schema",
+        ast::Stmt::DropSchema { .. } => "drop_schema",
     }
 }
 

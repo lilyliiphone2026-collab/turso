@@ -51,6 +51,9 @@ impl SchemaEntryType {
             "index" => Ok(Self::Index),
             "trigger" => Ok(Self::Trigger),
             "view" => Ok(Self::View),
+            "schema" => Err(crate::error::LimboError::ParseError(
+                "VACUUM is not supported for a database with schemas".to_string(),
+            )),
             other => Err(crate::error::LimboError::Corrupt(format!(
                 "unexpected sqlite_schema type: {other}"
             ))),

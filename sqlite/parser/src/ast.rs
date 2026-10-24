@@ -359,6 +359,16 @@ pub enum Stmt {
         /// sequence name
         seq_name: QualifiedName,
     },
+    /// `CREATE SCHEMA`: a namespace stored in the main database
+    CreateSchema {
+        /// schema name
+        name: Name,
+    },
+    /// `DROP SCHEMA`
+    DropSchema {
+        /// schema name
+        name: Name,
+    },
 }
 
 #[repr(transparent)]
