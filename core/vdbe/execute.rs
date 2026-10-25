@@ -17739,6 +17739,7 @@ pub fn op_rename_table(
                 }
 
                 normalized_to.clone_into(&mut btree.name);
+                to.clone_into(&mut btree.original_name);
             }
             Table::Virtual(vtab) => {
                 Arc::make_mut(vtab).name.clone_from(&normalized_to);
