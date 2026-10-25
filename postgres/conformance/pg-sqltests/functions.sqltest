@@ -1100,3 +1100,13 @@ expect {
     <null>|"x"
     {"y":2}|"z"
 }
+
+test function-whose-name-starts-with-a-bracket-does-not-exist {
+    SELECT "[x"();
+}
+expect error {
+    function \[x\(\) does not exist
+}
+expect @tursopg error {
+    no such function: \[x
+}
