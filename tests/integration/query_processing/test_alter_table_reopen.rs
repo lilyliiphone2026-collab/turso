@@ -126,9 +126,9 @@ fn alter_table_add_drop_column_keeps_mixed_case_sequence_name_reopen(enable_mvcc
 /// Databases written by Turso v0.9.0-pre.1 and earlier keep working. Those
 /// versions stored the lowercased table name in `sqlite_sequence`, and ADD
 /// COLUMN rewrote the stored CREATE TABLE with the lowercased name. The test
-/// builds that state from a database made by the current code, then checks
-/// that INSERT, RENAME TO and DROP TABLE use the old rows and that ids keep
-/// counting from them after a reopen.
+/// builds that state with the current code, then checks that INSERT, RENAME
+/// TO and DROP TABLE use the old rows and that ids keep counting from them
+/// after a reopen.
 #[test]
 fn test_autoincrement_tables_from_older_turso_keep_working() {
     autoincrement_tables_from_older_turso_keep_working(false);
@@ -156,13 +156,14 @@ fn autoincrement_tables_from_older_turso_keep_working(enable_mvcc: bool) {
         let conn = db.connect_limbo();
         conn.execute("CREATE TABLE \"MiXeD Name\"(id INTEGER PRIMARY KEY AUTOINCREMENT, v)")
             .unwrap();
-        conn.execute("CREATE TABLE \"AdD Col\"(id INTEGER PRIMARY KEY AUTOINCREMENT, v)")
+        // ADD COLUMN in older versions rewrote the CREATE TABLE text with the
+        // lowercased name. Creating the table with that text gives the same
+        // sqlite_schema row.
+        conn.execute("CREATE TABLE \"add col\" (id INTEGER PRIMARY KEY AUTOINCREMENT, v, w)")
             .unwrap();
         conn.execute("INSERT INTO \"MiXeD Name\"(v) VALUES ('x'), ('y')")
             .unwrap();
         conn.execute("INSERT INTO \"AdD Col\"(v) VALUES ('a'), ('b'), ('c')")
-            .unwrap();
-        conn.execute("ALTER TABLE \"AdD Col\" ADD COLUMN w")
             .unwrap();
         // Without the sqlite_sequence rows, the next ids would reuse these.
         conn.execute("DELETE FROM \"MiXeD Name\" WHERE id = 2")
@@ -170,21 +171,6 @@ fn autoincrement_tables_from_older_turso_keep_working(enable_mvcc: bool) {
         conn.execute("DELETE FROM \"AdD Col\" WHERE id = 3")
             .unwrap();
         conn.close().unwrap();
-    }
-
-    // Turso has no PRAGMA writable_schema, so the old CREATE TABLE text is
-    // written with SQLite.
-    {
-        let sqlite = rusqlite::Connection::open(&path).unwrap();
-        sqlite
-            .execute_batch(
-                "PRAGMA writable_schema = ON;
-                 UPDATE sqlite_schema
-                 SET sql = 'CREATE TABLE \"add col\" (id INTEGER PRIMARY KEY AUTOINCREMENT, v, w)'
-                 WHERE name = 'add col';
-                 PRAGMA writable_schema = OFF;",
-            )
-            .unwrap();
     }
 
     {
