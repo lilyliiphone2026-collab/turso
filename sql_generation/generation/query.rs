@@ -373,6 +373,8 @@ impl Arbitrary for Insert {
             })
         };
 
+        let gen_replace = |rng: &mut R| gen_replace_values(rng, env);
+
         let mut choices = vec![
             (
                 1,
@@ -386,6 +388,10 @@ impl Arbitrary for Insert {
                 1,
                 Box::new(gen_nested_self_insert) as Box<dyn Fn(&mut R) -> Option<Insert>>,
             ),
+            (
+                1,
+                Box::new(gen_replace) as Box<dyn Fn(&mut R) -> Option<Insert>>,
+            ),
         ];
 
         if env.opts().arbitrary_insert_into_select {
@@ -394,6 +400,54 @@ impl Arbitrary for Insert {
 
         backtrack(choices, rng).expect("backtrack should with these arguments not return None")
     }
+}
+
+/// Generate a `REPLACE INTO` that is *guaranteed* to hit the
+/// delete-then-insert path: unique/PK columns reuse an existing row's value
+/// (guaranteed conflict), while non-unique columns are spliced in from a
+/// *different* row (chimera rows expose stale-index and cursor-positioning
+/// bugs after the replacement).
+fn gen_replace_values<R: Rng + ?Sized, C: GenerationContext>(
+    rng: &mut R,
+    env: &C,
+) -> Option<Insert> {
+    let candidates: Vec<&Table> = env
+        .tables()
+        .iter()
+        .filter(|t| {
+            t.rows.len() >= 2
+                && t.columns.iter().all(|c| !c.is_generated())
+                && t.columns.iter().any(|c| c.has_unique_or_pk())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let table = *pick(&candidates, rng);
+
+    let existing_row = pick(&table.rows, rng);
+    let donor_row = pick(&table.rows, rng);
+
+    let values: Vec<SimValue> = table
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if c.has_unique_or_pk() {
+                // Guaranteed conflict: reuse the base row's unique value.
+                existing_row[i].clone()
+            } else {
+                // Splice from a different row to vary the payload.
+                donor_row[i].clone()
+            }
+        })
+        .collect();
+
+    Some(Insert::Replace {
+        table: table.name.clone(),
+        values: vec![values],
+    })
 }
 
 fn gen_insert_values<R: Rng + ?Sized, C: GenerationContext>(

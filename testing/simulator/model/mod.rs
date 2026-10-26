@@ -412,6 +412,7 @@ impl Query {
             Query::Insert(Insert::Select { table, .. })
             | Query::Insert(Insert::Values { table, .. })
             | Query::Insert(Insert::ValuesWithColumns { table, .. })
+            | Query::Insert(Insert::Replace { table, .. })
             | Query::Delete(Delete { table, .. })
             | Query::Update(Update { table, .. })
             | Query::Drop(Drop { table, .. })
@@ -448,6 +449,7 @@ impl Query {
             Query::Insert(Insert::Select { table, .. })
             | Query::Insert(Insert::Values { table, .. })
             | Query::Insert(Insert::ValuesWithColumns { table, .. })
+            | Query::Insert(Insert::Replace { table, .. })
             | Query::Delete(Delete { table, .. })
             | Query::Update(Update { table, .. })
             | Query::Drop(Drop { table, .. })
@@ -867,6 +869,60 @@ impl Shadow for Insert {
                     tables.record_insert(table_name.clone(), row.clone());
                 }
                 tables[table_pos].rows.extend(rows);
+                Ok(vec![])
+            }
+            Insert::Replace { table, values } => {
+                let table_name = table.clone();
+
+                let table_pos = tables
+                    .iter()
+                    .position(|t| t.name == table_name)
+                    .ok_or_else(|| anyhow::anyhow!("Table {} does not exist", table_name))?;
+
+                let columns = tables[table_pos].columns.clone();
+
+                let new_rows: Vec<Vec<SimValue>> = values
+                    .iter()
+                    .map(|row| expand_with_generated_columns(&tables[table_pos].clone(), None, row))
+                    .collect();
+
+                // Columns carrying a UNIQUE/PK constraint: a conflict on any
+                // of them deletes the pre-existing row before the insert lands.
+                let unique_idx: Vec<usize> = columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.has_unique_or_pk())
+                    .map(|(i, _)| i)
+                    .collect();
+
+                // SQLite applies REPLACE row by row: each new row first
+                // deletes every existing row conflicting on a UNIQUE/PK
+                // column (NULL never conflicts), then lands itself.
+                for new_row in &new_rows {
+                    let conflicts: Vec<Vec<SimValue>> = tables[table_pos]
+                        .rows
+                        .iter()
+                        .filter(|old_row| {
+                            unique_idx.iter().any(|&i| {
+                                new_row[i] != SimValue::NULL
+                                    && old_row[i] != SimValue::NULL
+                                    && new_row[i] == old_row[i]
+                            })
+                        })
+                        .cloned()
+                        .collect();
+
+                    for conflict_row in &conflicts {
+                        tables.record_delete(table_name.clone(), conflict_row.clone());
+                    }
+                    if let Some(table) = tables.iter_mut().find(|t| t.name == table_name) {
+                        table.rows.retain(|r| !conflicts.contains(r));
+                    }
+
+                    tables.record_insert(table_name.clone(), new_row.clone());
+                    tables[table_pos].rows.push(new_row.clone());
+                }
+
                 Ok(vec![])
             }
             Insert::Values {
