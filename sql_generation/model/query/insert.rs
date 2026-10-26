@@ -32,6 +32,12 @@ pub enum Insert {
         columns: Vec<String>,
         values: Vec<Vec<SimValue>>,
     },
+    /// `REPLACE INTO t VALUES ...`: conflicting rows are deleted before the
+    /// insert lands (unique/PK conflict ⇒ delete-then-insert, no error).
+    Replace {
+        table: String,
+        values: Vec<Vec<SimValue>>,
+    },
     Select {
         table: String,
         #[serde(default)]
@@ -55,13 +61,16 @@ impl Insert {
         match self {
             Insert::Values { table, .. }
             | Insert::ValuesWithColumns { table, .. }
+            | Insert::Replace { table, .. }
             | Insert::Select { table, .. } => table,
         }
     }
 
     pub fn rows(&self) -> &[Vec<SimValue>] {
         match self {
-            Insert::Values { values, .. } | Insert::ValuesWithColumns { values, .. } => values,
+            Insert::Values { values, .. }
+            | Insert::ValuesWithColumns { values, .. }
+            | Insert::Replace { values, .. } => values,
             Insert::Select { .. } => unreachable!(),
         }
     }
@@ -107,6 +116,23 @@ impl Display for Insert {
                     write!(f, "{col}")?;
                 }
                 write!(f, ") VALUES ")?;
+                for (i, row) in values.iter().enumerate() {
+                    if i != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "(")?;
+                    for (j, value) in row.iter().enumerate() {
+                        if j != 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{value}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+            Insert::Replace { table, values } => {
+                write!(f, "REPLACE INTO {table} VALUES ")?;
                 for (i, row) in values.iter().enumerate() {
                     if i != 0 {
                         write!(f, ", ")?;
