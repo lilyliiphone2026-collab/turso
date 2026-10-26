@@ -1,0 +1,52 @@
+name: replace-differential-hunt
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "minutes per job"
+        default: "90"
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  hunt:
+    strategy:
+      fail-fast: false
+      matrix:
+        seed_base: [1000, 5000, 9000]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Build simulator
+        run: cargo build --bin limbo_sim --release
+
+      - name: Differential hunt (turso vs sqlite)
+        run: |
+          SEED=$(( ${{ matrix.seed_base }} + RANDOM % 2000 ))
+          echo "hunt seed=$SEED"
+          MINUTES=${{ github.event.inputs.minutes || '90' }}
+          # Run until timeout or panic; capture everything.
+          set +e
+          timeout $(( MINUTES * 60 )) ./target/release/limbo_sim \
+            --differential -s "$SEED" -n 5000 -k 1000 2>&1 | tee sim.log
+          echo "exit=$?" >> "$GITHUB_ENV"
+          # Grep for differential mismatches / corruption signals
+          grep -nE "differential|Differential|mismatch|corrupt|InternalError|assertion" sim.log | head -50 > findings.txt || true
+          cat findings.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hunt-${{ matrix.seed_base }}-${{ github.run_id }}
+          path: |
+            sim.log
+            findings.txt
+            .bugbase
+          retention-days: 7
