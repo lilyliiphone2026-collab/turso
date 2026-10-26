@@ -1192,6 +1192,22 @@ expect {
     00:00:00
 }
 
+test age-of-one-date-counts-from-midnight-today {
+    SELECT age(current_date);
+}
+expect {
+    00:00:00
+}
+
+test age-of-date-columns {
+    CREATE TABLE trips (started date, ended date);
+    INSERT INTO trips VALUES ('2025-01-01', '2026-10-08');
+    SELECT age(ended, started), age('2026-10-08 03:04:05'::timestamp, started) FROM trips;
+}
+expect {
+    1 year 9 mons 7 days|1 year 9 mons 7 days 03:04:05
+}
+
 test age-reads-untyped-text-as-a-timestamp {
     SELECT age('2026-10-08', '2025-01-01 01:02'),
            age('2026-10-08', '2025-01-01T01:02:03'),
