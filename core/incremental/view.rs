@@ -744,11 +744,15 @@ impl IncrementalView {
     /// Schema reconstruction uses this to order persisted materialized views
     /// before binding them. The executable DAG is still produced by the main
     /// bound planner; this walker is identity metadata only.
-    pub(crate) fn referenced_table_names(select: &ast::Select) -> std::vec::Vec<String> {
+    ///
+    /// Each name comes with the database it is qualified with, if any.
+    pub(crate) fn referenced_table_names(
+        select: &ast::Select,
+    ) -> std::vec::Vec<(Option<String>, String)> {
         fn collect_source(
             source: &ast::SelectTable,
             cte_names: &HashSet<String>,
-            tables: &mut HashSet<String>,
+            tables: &mut HashSet<(Option<String>, String)>,
         ) {
             match source {
                 ast::SelectTable::Table(name, _, _) => {
@@ -758,7 +762,12 @@ impl IncrementalView {
                     {
                         return;
                     }
-                    tables.insert(crate::util::normalize_ident(name.name.as_str()));
+                    tables.insert((
+                        name.namespace
+                            .as_ref()
+                            .map(|database| crate::util::normalize_ident(database.as_str())),
+                        crate::util::normalize_ident(name.name.as_str()),
+                    ));
                 }
                 ast::SelectTable::Select { select, .. } => {
                     collect_select(select, cte_names, tables)
@@ -776,7 +785,7 @@ impl IncrementalView {
         fn collect_one(
             select: &ast::OneSelect,
             cte_names: &HashSet<String>,
-            tables: &mut HashSet<String>,
+            tables: &mut HashSet<(Option<String>, String)>,
         ) {
             let ast::OneSelect::Select {
                 columns,
@@ -832,7 +841,7 @@ impl IncrementalView {
         fn collect_select(
             select: &ast::Select,
             inherited_ctes: &HashSet<String>,
-            tables: &mut HashSet<String>,
+            tables: &mut HashSet<(Option<String>, String)>,
         ) {
             let mut cte_names = inherited_ctes.clone();
             if let Some(with) = &select.with {

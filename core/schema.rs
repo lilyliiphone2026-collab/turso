@@ -1798,6 +1798,131 @@ impl Schema {
         objects.views.get(&name).cloned()
     }
 
+    /// Work out every view's columns again from its SELECT and the current
+    /// schema. Call it after a statement creates, drops or alters a table or
+    /// view; otherwise `View::columns` keeps the columns the view had when it
+    /// was loaded. As in SQLite, a view that reads a missing table or view,
+    /// reads itself, or whose SELECT no longer resolves has no columns.
+    /// `database_id` is the database of this schema: a TEMP view can read
+    /// tables of other databases, which this schema does not hold, so a table
+    /// missing from the temp schema does not count as missing.
+    pub fn refresh_view_columns(&mut self, database_id: usize) -> Result<()> {
+        let view_names: Vec<String> = self
+            .namespace(NamespaceId::ROOT)
+            .views
+            .keys()
+            .cloned()
+            .try_collect()?;
+        let mut refreshed = HashSet::default();
+        for view_name in &view_names {
+            self.refresh_columns_of_view(view_name, database_id, &mut vec![], &mut refreshed)?;
+        }
+        Ok(())
+    }
+
+    /// Refreshes the views `view_name` reads first, so its columns are worked
+    /// out from their current columns.
+    fn refresh_columns_of_view(
+        &mut self,
+        view_name: &str,
+        database_id: usize,
+        views_in_progress: &mut Vec<String>,
+        refreshed: &mut HashSet<String>,
+    ) -> Result<()> {
+        if refreshed.contains(view_name) {
+            return Ok(());
+        }
+        let Some(view) = self.get_view(NamespaceId::ROOT, view_name) else {
+            return Ok(());
+        };
+        let reads = IncrementalView::referenced_table_names(&view.select_stmt);
+        // This schema does not hold the objects of other databases, so the
+        // columns of a TEMP view that names one, such as `main.t`, cannot be
+        // worked out here. Keep the columns it has.
+        let reads_other_database = reads.iter().any(|(database, _)| {
+            database
+                .as_deref()
+                .is_some_and(|database| database != "temp")
+        });
+        if database_id == crate::TEMP_DB_ID && reads_other_database {
+            refreshed.insert(view_name.to_string());
+            return Ok(());
+        }
+        let read_names: Vec<String> = reads.into_iter().map(|(_, name)| name).try_collect()?;
+        views_in_progress.push(view_name.to_string());
+        for read_name in &read_names {
+            if !views_in_progress.contains(read_name) {
+                self.refresh_columns_of_view(read_name, database_id, views_in_progress, refreshed)?;
+            }
+        }
+        views_in_progress.pop();
+
+        let reads_missing_object = read_names.iter().any(|read_name| {
+            if read_name == view_name || views_in_progress.contains(read_name) {
+                return true;
+            }
+            match self.get_view(NamespaceId::ROOT, read_name) {
+                Some(read_view) => read_view.columns.is_empty(),
+                None => {
+                    database_id != crate::TEMP_DB_ID
+                        && self.get_table(NamespaceId::ROOT, read_name).is_none()
+                }
+            }
+        });
+        let columns = if reads_missing_object {
+            vec![]
+        } else {
+            match self.view_columns_from_select(&view) {
+                Ok(columns) => columns,
+                Err(LimboError::ParseError(_)) => vec![],
+                Err(err) => return Err(err),
+            }
+        };
+        refreshed.insert(view_name.to_string());
+        if let Some(view) = self
+            .namespace_mut(NamespaceId::ROOT)
+            .views
+            .get_mut(view_name)
+        {
+            Arc::make_mut(view).columns = columns;
+        }
+        Ok(())
+    }
+
+    /// Like SQLite, the column list of `CREATE VIEW v(x, y)` decides how many
+    /// columns the view has. The SELECT gives their types only when it has as
+    /// many columns as the list, which stops being true when ALTER TABLE adds
+    /// or drops a column of a table that `SELECT *` reads.
+    fn view_columns_from_select(&self, view: &View) -> Result<Vec<Column>> {
+        let mut columns =
+            crate::util::extract_view_columns(&view.select_stmt, self)?.flat_columns()?;
+        if view.explicit_columns.is_empty() {
+            return Ok(columns);
+        }
+        if columns.len() != view.explicit_columns.len() {
+            let (no_type, _) = crate::util::type_from_name("");
+            return Ok(view
+                .explicit_columns
+                .iter()
+                .map(|name| {
+                    Column::new(
+                        Some(name.clone()),
+                        String::new(),
+                        None,
+                        None,
+                        no_type,
+                        None,
+                        ColDef::default(),
+                    )
+                })
+                .try_collect()?);
+        }
+        for (column, name) in columns.iter_mut().zip(&view.explicit_columns) {
+            column.name = Some(name.clone());
+        }
+        Ok(columns)
+    }
+
     pub fn add_trigger(
         &mut self,
         namespace: NamespaceId,
@@ -2607,7 +2732,7 @@ impl Schema {
                 )));
             };
             let view_name = normalize_ident(view_name);
-            for dependency in IncrementalView::referenced_table_names(&select) {
+            for (_, dependency) in IncrementalView::referenced_table_names(&select) {
                 if names.contains(&dependency) {
                     *indegree.get_mut(&view_name).ok_or_else(|| {
                         LimboError::Corrupt(format!(
@@ -2847,7 +2972,7 @@ impl Schema {
                 return;
             }
             if let Some(view) = schema.get_view(namespace, &name) {
-                for dependency in IncrementalView::referenced_table_names(&view.select_stmt) {
+                for (_, dependency) in IncrementalView::referenced_table_names(&view.select_stmt) {
                     expand(schema, namespace, &dependency, seen, out);
                 }
             }
@@ -2857,7 +2982,7 @@ impl Schema {
         }
         let mut seen = HashSet::default();
         let mut out = vec![];
-        for table_name in IncrementalView::referenced_table_names(select) {
+        for (_, table_name) in IncrementalView::referenced_table_names(select) {
             expand(self, namespace, &table_name, &mut seen, &mut out);
         }
         out
@@ -3192,19 +3317,17 @@ impl Schema {
                             select,
                             ..
                         } => {
-                            let mut view_column_schema =
-                                crate::util::extract_view_columns(&select, self)?;
-                            view_column_schema.rename_columns(&column_names);
-                            let view = View::new(
+                            let mut view = View::new(
                                 name.to_string(),
                                 sql.to_string(),
                                 select,
-                                view_column_schema.flat_columns()?,
+                                vec![],
                                 column_names
                                     .iter()
                                     .map(|column| column.col_name.as_str().to_string())
                                     .try_collect()?,
                             );
+                            view.columns = self.view_columns_from_select(&view)?;
                             self.add_view(NamespaceId::ROOT, view)?;
                         }
                         _ => {}
