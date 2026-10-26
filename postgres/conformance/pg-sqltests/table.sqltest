@@ -418,3 +418,29 @@ test table-column-names-keep-their-quote-characters {
 expect {
     1|2|3|4
 }
+
+test drop-materialized-view-on-a-view-errors {
+    CREATE TABLE t (a int);
+    CREATE VIEW v AS SELECT * FROM t;
+    DROP MATERIALIZED VIEW v;
+}
+expect error {
+    "v" is not a materialized view
+}
+
+test drop-materialized-view-if-exists-on-a-view-errors {
+    CREATE TABLE t (a int);
+    CREATE VIEW v AS SELECT * FROM t;
+    DROP MATERIALIZED VIEW IF EXISTS public.v;
+}
+expect error {
+    "v" is not a materialized view
+}
+
+test drop-view-on-a-table-errors {
+    CREATE TABLE t (a int);
+    DROP VIEW IF EXISTS t;
+}
+expect error {
+    "t" is not a view
+}

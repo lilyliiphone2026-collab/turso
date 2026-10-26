@@ -662,6 +662,47 @@ fn test_vacuum_into_basic(tmp_db: TempDatabase) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[turso_macros::test(mvcc, init_sql = "CREATE TABLE t (a INTEGER, path TEXT);")]
+fn test_vacuum_into_path_expression(tmp_db: TempDatabase) -> anyhow::Result<()> {
+    let conn = tmp_db.connect_limbo();
+    let dest_dir = TempDir::new()?;
+    let subquery_path = dest_dir.path().join("subquery.db");
+    let subquery_path_str = subquery_path.to_str().unwrap().to_string();
+    let concat_prefix = dest_dir.path().join("concat");
+    let concat_prefix_str = concat_prefix.to_str().unwrap();
+
+    conn.execute(format!(
+        "INSERT INTO t VALUES (42, '{}')",
+        escape_sqlite_string_literal(&subquery_path_str)
+    ))?;
+    conn.execute("VACUUM INTO (SELECT path FROM t)")?;
+    conn.execute(format!(
+        "VACUUM INTO '{}' || '.db'",
+        escape_sqlite_string_literal(concat_prefix_str)
+    ))?;
+    let parameter_path = dest_dir.path().join("parameter.db");
+    let mut stmt = conn.prepare("VACUUM INTO ?")?;
+    stmt.bind_at(
+        1.try_into()?,
+        Value::build_text(parameter_path.to_str().unwrap().to_string()),
+    )?;
+    stmt.run_ignore_rows()?;
+
+    for dest_path in [
+        subquery_path,
+        dest_dir.path().join("concat.db"),
+        parameter_path,
+    ] {
+        let dest_db = TempDatabase::new_with_existent_with_opts(&dest_path, tmp_db.db_opts);
+        let dest_conn = dest_db.connect_limbo();
+        assert_eq!(run_integrity_check(&dest_conn), "ok");
+        let rows: Vec<(i64, String)> = dest_conn.exec_rows("SELECT a, path FROM t");
+        assert_eq!(rows, vec![(42, subquery_path_str.clone())]);
+    }
+
+    Ok(())
+}
+
 /// Test VACUUM INTO error cases: plain VACUUM, existing non-empty and empty
 /// files, within transaction, and query_only mode.
 #[turso_macros::test(mvcc)]
@@ -4188,6 +4229,53 @@ fn test_plain_vacuum_preserves_custom_types() -> anyhow::Result<()> {
     let reopened_rows: Vec<(i64, i64)> =
         reopened_conn.exec_rows("SELECT id, amount FROM t ORDER BY id");
     assert_eq!(reopened_rows, before_rows);
+
+    Ok(())
+}
+
+/// Plain VACUUM must copy array values as stored. Converting them to display
+/// text and back turned BLOB[] elements into TEXT and changed ANY[] element
+/// types.
+#[test]
+fn test_plain_vacuum_preserves_array_values() -> anyhow::Result<()> {
+    let opts = DatabaseOpts::new().with_custom_types(true);
+    let tmp_db = TempDatabase::builder().with_opts(opts).build();
+    let conn = tmp_db.connect_limbo();
+
+    conn.execute("CREATE TYPE cents BASE integer ENCODE value * 100 DECODE value / 100")?;
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, b BLOB[], a ANY[], c cents[]) STRICT")?;
+    conn.execute(
+        "INSERT INTO t VALUES \
+         (1, ARRAY[], ARRAY[1, '1', x'01'], ARRAY[1, 2]), \
+         (2, ARRAY[x'cafe'], NULL, ARRAY[])",
+    )?;
+
+    let query = "SELECT id, hex(b), hex(a), hex(c), c FROM t ORDER BY id";
+    let before_rows: Vec<(i64, String, String, String, String)> = conn.exec_rows(query);
+    assert_eq!(
+        before_rows,
+        vec![
+            (
+                1,
+                "01".to_string(),
+                "04090F0E3101".to_string(),
+                "0301026400C8".to_string(),
+                "{1,2}".to_string()
+            ),
+            (
+                2,
+                "0210CAFE".to_string(),
+                String::new(),
+                "01".to_string(),
+                "{}".to_string()
+            ),
+        ]
+    );
+
+    conn.execute("VACUUM")?;
+    assert_eq!(run_integrity_check(&conn), "ok");
+    let after_rows: Vec<(i64, String, String, String, String)> = conn.exec_rows(query);
+    assert_eq!(after_rows, before_rows);
 
     Ok(())
 }

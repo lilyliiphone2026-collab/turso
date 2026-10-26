@@ -1245,6 +1245,7 @@ fn plan_cte(
                 identifier: referenced_cte_table.identifier.clone(),
                 internal_id: referenced_cte_table.internal_id,
                 table: referenced_cte_table.table.clone(),
+                database_id: referenced_cte_table.database_id,
                 join_info: None,
                 col_used_mask: ColumnUsedMask::default(),
                 cte_select: None,
@@ -1447,6 +1448,7 @@ fn prepare_recursive_cte_plan(
         identifier: cte_definition.name.clone(),
         internal_id: input_table.internal_id,
         table: input_table.table,
+        database_id: input_table.database_id,
         join_info: None,
         col_used_mask: ColumnUsedMask::default(),
         cte_select: None,
@@ -1642,6 +1644,7 @@ fn parse_from_clause_table(
                 outer_query_refs_for_subquery.push(OuterQueryReference {
                     identifier: cte_definition.name.clone(),
                     internal_id: cte_table.internal_id,
+                    database_id: cte_table.database_id,
                     table: cte_table.table,
                     join_info: None,
                     col_used_mask: ColumnUsedMask::default(),
@@ -2126,8 +2129,11 @@ fn parse_table(
     }
 
     // Resolve table using connection's with_schema method
-    let database_id = resolver.resolve_existing_table_database_id_qualified(qualified_name)?;
-    let table = resolver.with_schema(database_id, |schema| schema.get_table(table_name.as_str()));
+    let namespace = resolver.resolve_existing_table(qualified_name)?;
+    let database_id = namespace.database_id;
+    let table = resolver.with_schema(database_id, |schema| {
+        schema.get_table(namespace.id, table_name.as_str())
+    });
 
     if let Some(table) = table {
         let alias = maybe_alias.map(|a| normalize_ident(a.name().as_str()));
@@ -2162,8 +2168,9 @@ fn parse_table(
         return Ok(());
     };
 
-    let regular_view =
-        resolver.with_schema(database_id, |schema| schema.get_view(table_name.as_str()));
+    let regular_view = resolver.with_schema(database_id, |schema| {
+        schema.get_view(namespace.id, table_name.as_str())
+    });
     if let Some(view) = regular_view {
         // Views are essentially query aliases, so just Expand the view as a subquery.
         let view_alias = maybe_alias
@@ -2177,7 +2184,7 @@ fn parse_table(
         // sqlite3FixSelect/sqlite3FixSrcList): a view's unqualified names are
         // fixed to the database it was created in, not resolved TEMP-first
         // like an ordinary top-level query.
-        let view_plan = resolver.with_view_scope(database_id, view.name.clone(), || {
+        let view_plan = resolver.with_view_scope(namespace, view.name.clone(), || {
             program.with_view_expansion(database_id, &view.name, |program| {
                 prepare_select_plan(
                     view.select_stmt.clone(),
@@ -2202,13 +2209,13 @@ fn parse_table(
     }
 
     let view = resolver.with_schema(database_id, |schema| {
-        schema.get_materialized_view(table_name.as_str())
+        schema.get_materialized_view(namespace.id, table_name.as_str())
     });
     if let Some(view) = view {
         // Every materialized view carries an explicit storage-version marker,
         // including circuits with no stateful operators.
         let has_compatible_storage = resolver.with_schema(database_id, |schema| {
-            schema.has_compatible_materialized_view_storage(table_name.as_str())
+            schema.has_compatible_materialized_view_storage(namespace.id, table_name.as_str())
         });
 
         if !has_compatible_storage {
@@ -2299,9 +2306,7 @@ fn parse_table(
 
     // Check if this is an incompatible view
     let is_incompatible = resolver.with_schema(database_id, |schema| {
-        schema
-            .incompatible_views
-            .contains(&normalized_qualified_name)
+        schema.is_incompatible_view(namespace.id, &normalized_qualified_name)
     });
 
     if is_incompatible {
@@ -2317,7 +2322,7 @@ fn parse_table(
 
     // A view row whose stored SQL failed to parse at schema load
     let is_broken_view = resolver.with_schema(database_id, |schema| {
-        schema.broken_views.contains(&normalized_qualified_name)
+        schema.is_broken_view(namespace.id, &normalized_qualified_name)
     });
 
     if is_broken_view {
@@ -2508,6 +2513,7 @@ fn add_ctes_read_by_subqueries_as_outer_refs(
         table_references.add_outer_query_reference(OuterQueryReference {
             identifier: cte_definition.name.clone(),
             internal_id: joined_table.internal_id,
+            database_id: joined_table.database_id,
             table: joined_table.table,
             join_info: None,
             col_used_mask: ColumnUsedMask::default(),

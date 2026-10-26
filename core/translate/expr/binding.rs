@@ -363,13 +363,13 @@ pub fn bind_and_rewrite_expr<'a>(
                         name: tbl_name_clone,
                         alias: None,
                     };
-                    let db_resolution = resolver.resolve_database_id(&qualified_name);
+                    let db_resolution = resolver.resolve_namespace(&qualified_name);
 
-                    if let Ok(database_id) = db_resolution.as_ref() {
+                    if let Ok(namespace) = db_resolution.as_ref() {
                         match resolve_qualified_name(
                             referenced_tables,
                             resolver,
-                            Some(*database_id),
+                            Some(namespace.database_id),
                             &tbl_name_str,
                             &normalized_col_name,
                         )? {
@@ -397,9 +397,10 @@ pub fn bind_and_rewrite_expr<'a>(
                     // the table+column exist, use that. Otherwise fall through to
                     // table.column.field for struct/union field access.
                     let mut resolved_as_db_table_col = false;
-                    if let Ok(database_id) = db_resolution {
-                        let table = resolver
-                            .with_schema(database_id, |schema| schema.get_table(&tbl_name_str));
+                    if let Ok(namespace) = db_resolution {
+                        let table = resolver.with_schema(namespace.database_id, |schema| {
+                            schema.get_table(namespace.id, &tbl_name_str)
+                        });
 
                         if let Some(table) = table {
                             let col_idx = table.columns().iter().position(|c| {
@@ -746,13 +747,7 @@ fn resolve_qualified_name(
             &joined_table.table,
             joined_table.internal_id,
             &joined_table.identifier,
-            if database_id == Some(joined_table.database_id)
-                && matches!(joined_table.table, Table::BTree(_) | Table::Virtual(_))
-            {
-                None
-            } else {
-                database_id
-            },
+            database_id_to_match(&joined_table.table, joined_table.database_id, database_id),
             table_name,
             column_name,
         )?;
@@ -797,7 +792,7 @@ fn resolve_qualified_name(
             &outer_ref.table,
             outer_ref.internal_id,
             &outer_ref.identifier,
-            database_id,
+            database_id_to_match(&outer_ref.table, outer_ref.database_id, database_id),
             table_name,
             column_name,
         )?;
@@ -838,6 +833,22 @@ fn resolve_qualified_name(
         Ok(QualifiedNameMatch::NoColumn)
     } else {
         Ok(QualifiedNameMatch::NoTable)
+    }
+}
+
+/// A schema name that matches the table's own database is already satisfied,
+/// so the table can then be matched by its alias.
+fn database_id_to_match(
+    table: &Table,
+    table_database_id: usize,
+    database_id: Option<usize>,
+) -> Option<usize> {
+    if database_id == Some(table_database_id)
+        && matches!(table, Table::BTree(_) | Table::Virtual(_))
+    {
+        None
+    } else {
+        database_id
     }
 }
 

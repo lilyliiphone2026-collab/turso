@@ -94,6 +94,7 @@ impl PostgreSQLTranslator {
             | "pg_collation"
             | "pg_attrdef"
             | "pg_description"
+            | "pg_seclabels"
             | "pg_publication"
             | "pg_publication_namespace"
             | "pg_publication_rel"
@@ -2366,7 +2367,7 @@ impl PostgreSQLTranslator {
         }
 
         let name = exact_name(func_name);
-        let qualified_name = if is_catalog_table_name(func_name) {
+        let qualified_name = if function_uses_main_schema(func_name) {
             ast::QualifiedName::fullname(exact_name("main"), name)
         } else {
             ast::QualifiedName::single(name)
@@ -2394,7 +2395,13 @@ impl PostgreSQLTranslator {
                 None => "unnest".into(),
             };
             return Ok(ast::SelectTable::Select {
-                select: single_column_function_select(qualified_name, args, "unnest", column_name),
+                select: single_column_function_select(
+                    qualified_name,
+                    args,
+                    None,
+                    "unnest",
+                    column_name,
+                ),
                 alias,
                 lateral: true,
             });
@@ -2405,36 +2412,52 @@ impl PostgreSQLTranslator {
         ) {
             return self.translate_json_to_record(func_name, range_func, &args, alias);
         }
-        if func_name == "generate_series" {
-            if let Some(range_alias) = &range_func.alias {
-                let names = alias_column_names(range_alias)?;
-                if names.len() > 1 {
-                    return Err(ParseError::ParseError(format!(
-                        "table \"{}\" has 1 columns available but {} columns specified",
-                        range_alias.aliasname,
-                        names.len()
-                    )));
-                }
-                if let Some(column_name) = names.into_iter().next() {
-                    return Ok(ast::SelectTable::Select {
-                        select: single_column_function_select(
-                            qualified_name,
-                            args,
-                            "value",
-                            column_name,
-                        ),
-                        alias,
-                        lateral: true,
-                    });
-                }
-            }
-        }
         if !range_func.coldeflist.is_empty() {
             return Err(not_supported(format!(
                 "a column definition list on {func_name}()"
             )));
         }
+        if func_name == "generate_series" {
+            let column_name = match &range_func.alias {
+                Some(range_alias) => {
+                    let names = alias_column_names(range_alias)?;
+                    if names.len() > 1 {
+                        return Err(ParseError::ParseError(format!(
+                            "table \"{}\" has 1 columns available but {} columns specified",
+                            range_alias.aliasname,
+                            names.len()
+                        )));
+                    }
+                    names
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| range_alias.aliasname.clone())
+                }
+                None => func_name.to_string(),
+            };
+            let alias = alias.unwrap_or_else(|| ast::As::Elided(exact_name(func_name)));
+            // Evaluate the arguments in their own VALUES row so that names like `value` or
+            // `start` resolve to columns on the left, not to generate_series's own columns.
+            // VALUES, unlike a SELECT, still rejects aggregate and window functions.
+            let (arguments, args) = function_arguments_subquery(args);
+            return Ok(ast::SelectTable::Select {
+                select: single_column_function_select(
+                    qualified_name,
+                    args,
+                    Some(arguments),
+                    "value",
+                    column_name,
+                ),
+                alias: Some(alias),
+                lateral: true,
+            });
+        }
         reject_column_aliases(&range_func.alias, "a function")?;
+
+        fn function_uses_main_schema(name: &str) -> bool {
+            is_catalog_table_name(name) || name == "generate_series"
+        }
+
         Ok(ast::SelectTable::TableCall(qualified_name, args, alias))
     }
 
@@ -5004,9 +5027,25 @@ impl PostgreSQLTranslator {
 fn single_column_function_select(
     function: ast::QualifiedName,
     args: Vec<Box<ast::Expr>>,
+    arguments: Option<ast::SelectTable>,
     source_column: &str,
     column_name: String,
 ) -> ast::Select {
+    let call = ast::SelectTable::TableCall(function, args, None);
+    let from = match arguments {
+        Some(arguments) => ast::FromClause {
+            select: Box::new(arguments),
+            joins: vec![ast::JoinedSelectTable {
+                operator: ast::JoinOperator::Comma,
+                table: Box::new(call),
+                constraint: None,
+            }],
+        },
+        None => ast::FromClause {
+            select: Box::new(call),
+            joins: vec![],
+        },
+    };
     ast::Select {
         with: None,
         body: ast::SelectBody {
@@ -5016,10 +5055,7 @@ fn single_column_function_select(
                     Box::new(ast::Expr::Id(exact_name(source_column))),
                     Some(ast::As::Elided(exact_name(column_name))),
                 )],
-                from: Some(ast::FromClause {
-                    select: Box::new(ast::SelectTable::TableCall(function, args, None)),
-                    joins: vec![],
-                }),
+                from: Some(from),
                 where_clause: None,
                 group_by: None,
                 window_clause: vec![],
@@ -5029,6 +5065,34 @@ fn single_column_function_select(
         order_by: vec![],
         limit: None,
     }
+}
+
+#[allow(clippy::vec_box)]
+fn function_arguments_subquery(
+    args: Vec<Box<ast::Expr>>,
+) -> (ast::SelectTable, Vec<Box<ast::Expr>>) {
+    let arg_refs = (1..=args.len())
+        .map(|i| {
+            Box::new(ast::Expr::Qualified(
+                exact_name("arg"),
+                exact_name(format!("column{i}")),
+            ))
+        })
+        .collect();
+    let subquery = ast::SelectTable::Select {
+        select: ast::Select {
+            with: None,
+            body: ast::SelectBody {
+                select: ast::OneSelect::Values(vec![args]),
+                compounds: vec![],
+            },
+            order_by: vec![],
+            limit: None,
+        },
+        alias: Some(ast::As::Elided(exact_name("arg"))),
+        lateral: false,
+    };
+    (subquery, arg_refs)
 }
 
 fn alias_column_names(alias: &pg_query::protobuf::Alias) -> Result<Vec<String>, ParseError> {
@@ -5236,6 +5300,7 @@ pub fn is_catalog_table_name(name: &str) -> bool {
             | "pg_collation"
             | "pg_attrdef"
             | "pg_description"
+            | "pg_seclabels"
             | "pg_publication"
             | "pg_publication_namespace"
             | "pg_publication_rel"
@@ -6307,6 +6372,22 @@ pub fn is_refresh_matview(parse_result: &ParseResult) -> Result<bool, ParseError
     Ok(true)
 }
 
+/// Returns true if the parse result is a DROP MATERIALIZED VIEW statement.
+/// It translates to the same DROP VIEW as DROP VIEW does.
+pub fn is_drop_matview(parse_result: &ParseResult) -> bool {
+    use pg_query::protobuf::ObjectType;
+    use pg_query::NodeRef;
+
+    let nodes = parse_result.protobuf.nodes();
+    if nodes.is_empty() {
+        return false;
+    }
+    matches!(
+        &nodes[0].0,
+        NodeRef::DropStmt(drop) if drop.remove_type == ObjectType::ObjectMatview as i32
+    )
+}
+
 /// Returns true if the parse result is a COMMENT ON statement.
 /// Comments are accepted for PostgreSQL compatibility but are not persisted.
 pub fn is_comment_on(parse_result: &ParseResult) -> bool {
@@ -7102,7 +7183,15 @@ mod tests {
             ),
             (
                 "SELECT g.n FROM generate_series(1, 3) AS g(n)",
-                "SELECT g.n FROM LATERAL (SELECT value n FROM generate_series (1, 3)) g",
+                "SELECT g.n FROM LATERAL (SELECT value n FROM (VALUES (1, 3)) arg, main.generate_series (arg.column1, arg.column2)) g",
+            ),
+            (
+                "SELECT g FROM generate_series(1, 3) g",
+                "SELECT g FROM LATERAL (SELECT value g FROM (VALUES (1, 3)) arg, main.generate_series (arg.column1, arg.column2)) g",
+            ),
+            (
+                "SELECT * FROM generate_series(1, 3)",
+                "SELECT * FROM LATERAL (SELECT value generate_series FROM (VALUES (1, 3)) arg, main.generate_series (arg.column1, arg.column2)) generate_series",
             ),
         ] {
             assert_eq!(translate(sql).unwrap(), expected, "{sql}");
