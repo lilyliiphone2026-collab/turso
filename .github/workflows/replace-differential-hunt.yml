@@ -5,7 +5,7 @@ on:
     inputs:
       minutes:
         description: "minutes per job"
-        default: "90"
+        default: "355"
   schedule:
     - cron: "0 */6 * * *"
 
@@ -13,10 +13,11 @@ jobs:
   hunt:
     strategy:
       fail-fast: false
+      max-parallel: 12
       matrix:
-        seed_base: [1000, 5000, 9000]
+        seed_base: [1000, 3000, 5000, 7000, 9000, 11000, 13000, 15000, 17000, 19000, 21000, 23000]
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
@@ -30,14 +31,16 @@ jobs:
         run: |
           SEED=$(( ${{ matrix.seed_base }} + RANDOM % 2000 ))
           echo "hunt seed=$SEED"
-          MINUTES=${{ github.event.inputs.minutes || '90' }}
-          # Run until timeout or panic; capture everything.
+          MINUTES=${{ github.event.inputs.minutes || '355' }}
           set +e
           timeout $(( MINUTES * 60 )) ./target/release/limbo_sim \
-            --differential -s "$SEED" -n 5000 -k 1000 2>&1 | tee sim.log
+            --differential -s "$SEED" -n 20000 -k 2000 2>&1 | tee sim.log
           echo "exit=$?" >> "$GITHUB_ENV"
-          # Grep for differential mismatches / corruption signals
-          grep -nE "differential|Differential|mismatch|corrupt|InternalError|assertion" sim.log | head -50 > findings.txt || true
+          # Real findings: one engine failed while the other did NOT, or
+          # results diverged. "both fail" warnings are error-taxonomy noise.
+          grep -nE "mismatch|corrupt|InternalError|assertion|panicked|divergence|ResultMismatch" sim.log | head -100 > findings.txt || true
+          # Also flag the interesting half: limbo failed but rusqlite succeeded
+          grep -B2 -A2 "limbo error" sim.log | grep -A2 -B2 -v "rusqlite error" | head -40 >> findings.txt || true
           cat findings.txt
 
       - name: Upload evidence
